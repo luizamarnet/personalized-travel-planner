@@ -4,6 +4,8 @@ An AI-powered travel planning application that helps users discover activities a
 
 The application combines web research, structured data extraction, user preferences, and language models to turn travel information into a practical travel plan.
 
+🚀 **[Try the AI Travel Planner](https://huggingface.co/spaces/LuizaRMarnet/travel-planner)**
+
 ## Overview
 
 Planning a trip involves more than finding interesting places. Activities need to match the traveler's interests, fit the available dates, and be organized into a realistic daily schedule.
