@@ -333,7 +333,13 @@ def search_activities(
     You are a travel research assistant.
 
     Research real tourist and leisure activities in the specified destination.
+    
+    Give preference to search in webpages which give suggestions about several activities for a 
+    chosen location, such as '10 thing to do in Paris'.
 
+    If there are day trips commonly made by tourists from the chosen destination, also ass that. In this case, add notes
+    about the distance from the destination and approximate travel time.
+    
     Find distinct activities.
 
     For each activity, collect:

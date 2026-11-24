@@ -433,7 +433,7 @@ def create_itinerary(
     state = copy.deepcopy(app_state or INITIAL_STATE)
 
     try:
-        # Validate the destination and timezone.
+        # 1. Validate the destination and timezone.
         location = state.get("destination_location")
 
         if not state.get("destination") or not location:
@@ -441,7 +441,7 @@ def create_itinerary(
 
         timezone = location.get("timezone")
 
-        # Keep only activities classified by the user.
+        # 2. Keep only activities classified by the user.
         selected_activities = [
             Activity.model_validate(activity)
             for activity in state.get("activities", [])
@@ -454,7 +454,7 @@ def create_itinerary(
                 "generating your itinerary."
             )
 
-        # Validate the planning data.
+        # 3. Validate the planning data.
         planning_input = ItineraryPlanningInput(
             destination=state["destination"],
             timezone=timezone,
@@ -463,38 +463,43 @@ def create_itinerary(
             ),
             activities=selected_activities,
         )
-        
-        # Display the loading animation.
-        yield (
-            state,
-            loading_message("Generating your itinerary"),
-            gr.update(value=None, visible=False),
-            gr.update(value="", visible=False),
-        )
-        # Generate the itinerary.
-        itinerary = generate_itinerary(planning_input)
 
-        # Render the itinerary HTML.
+        # 4. Generate the itinerary and stream progress updates.
+        for result in generate_itinerary(planning_input):
+
+            if isinstance(result, str):
+                yield (
+                    state,
+                    loading_message(result),
+                    gr.update(value=None, visible=False),
+                    gr.update(value="", visible=False),
+                )
+                continue
+
+            # 5. The final result is the complete Itinerary object.
+            itinerary = result
+
+        # 6. Render the itinerary HTML.
         html_output = render_itinerary_html(itinerary)
 
-        # Save the itinerary in the session state.
+        # 7. Save the itinerary in the session state.
         state["itinerary"] = itinerary.model_dump(mode="json")
 
-        # Create a standalone HTML document.
+        # 8. Create a standalone HTML document.
         document = f"""<!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Travel Itinerary - {html.escape(itinerary.destination)}</title>
-        </head>
-        <body>
-            {html_output}
-        </body>
-        </html>
-        """
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Travel Itinerary - {html.escape(itinerary.destination)}</title>
+</head>
+<body>
+    {html_output}
+</body>
+</html>
+"""
 
-        # Create a temporary HTML file for download.
+        # 9. Create a temporary HTML file for download.
         with tempfile.NamedTemporaryFile(
             mode="w",
             suffix=".html",
@@ -505,7 +510,7 @@ def create_itinerary(
             file.write(document)
             itinerary_file = file.name
 
-        return (
+        yield (
             state,
             "Your itinerary was generated successfully!",
             gr.update(value=itinerary_file, visible=True),
@@ -515,7 +520,7 @@ def create_itinerary(
     except Exception as exc:
         logger.exception("Itinerary generation failed.")
 
-        return (
+        yield (
             state,
             f"Could not generate itinerary: {html.escape(str(exc))}",
             gr.update(value=None, visible=False),

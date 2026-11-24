@@ -275,12 +275,47 @@ class ItineraryItemType(str, Enum):
     ACCOMMODATION = "accommodation"
 
 
+class DayOutline(BaseModel):
+    """High-level activity allocation for one day."""
+
+    date: date
+
+    # Activities assigned to this day, in the recommended order.
+    activity_ids: list[str] = Field(default_factory=list)
+
+
+class ItineraryOutline(BaseModel):
+    """High-level allocation of activities across the entire trip."""
+
+    destination: str
+    timezone: str
+
+    start_date: date
+    end_date: date
+
+    days: list[DayOutline] = Field(min_length=1)
+
+    # Activities that cannot reasonably fit into the trip.
+    unplanned_activity_ids: list[str] = Field(
+        default_factory=list
+    )
+
+    warnings: list[str] = Field(default_factory=list)
+
+
+    
+
+    
+
 class ItineraryItem(BaseModel):
     """One scheduled block in a daily itinerary."""
 
     item_type: ItineraryItemType
-
     title: str
+
+    # Reference to an activity from the discovery stage.
+    activity_id: str | None = None
+
     description: str
 
     start_time: time
@@ -297,8 +332,7 @@ class ItineraryItem(BaseModel):
     latitude: float | None = None
     longitude: float | None = None
 
-    # Reference to an activity from the discovery stage.
-    activity_id: str | None = None
+    
 
     # Additional details about what to visit or do.
     highlights: list[str] = Field(default_factory=list)
@@ -383,6 +417,44 @@ class ItineraryItem(BaseModel):
         return self
 
 
+def _validate_schedule_overlaps(
+    items: list[ItineraryItem],
+) -> None:
+    """Reject overlapping items, except meals within activities."""
+
+    for index, current in enumerate(items):
+        for previous in items[:index]:
+
+            # No overlap.
+            if (
+                current.start_time >= previous.end_time
+                or previous.start_time >= current.end_time
+            ):
+                continue
+
+            # A meal can take place during a longer activity,
+            # such as a full-day trip.
+            meal_inside_activity = (
+                current.item_type == ItineraryItemType.MEAL
+                and previous.item_type == ItineraryItemType.ACTIVITY
+                and previous.start_time <= current.start_time
+                and current.end_time <= previous.end_time
+            ) or (
+                previous.item_type == ItineraryItemType.MEAL
+                and current.item_type == ItineraryItemType.ACTIVITY
+                and current.start_time <= previous.start_time
+                and previous.end_time <= current.end_time
+            )
+
+            if meal_inside_activity:
+                continue
+
+            raise ValueError(
+                f"Schedule conflict: '{previous.title}' "
+                f"overlaps with '{current.title}'."
+            )
+
+
 class DayPlan(BaseModel):
     """Complete itinerary for one day."""
 
@@ -402,25 +474,20 @@ class DayPlan(BaseModel):
 
     summary: str | None = None
 
+    unfulfilled_activity_ids: list[str] = Field(default_factory=list)
+
+    
+    
     @model_validator(mode="after")
     def validate_schedule(self) -> DayPlan:
         """Ensure itinerary items are chronological and do not overlap."""
 
-        # Sort all items chronologically.
         self.items = sorted(
             self.items,
             key=lambda item: item.start_time,
         )
 
-        for previous, current in zip(
-            self.items,
-            self.items[1:],
-        ):
-            if current.start_time < previous.end_time:
-                raise ValueError(
-                    f"Schedule conflict: '{previous.title}' "
-                    f"overlaps with '{current.title}'."
-                )
+        _validate_schedule_overlaps(self.items)
 
         # Calculate walking time only when every item has
         # a known walking duration.
@@ -436,6 +503,8 @@ class DayPlan(BaseModel):
             self.walking_minutes_total = None
 
         return self
+
+
 
 class Itinerary(BaseModel):
     """Complete trip itinerary."""
