@@ -36,10 +36,13 @@ class ActivityData(BaseModel):
         default=None,
         gt=0,
     )
+
     estimated_price: str | None = None
+    price_currency: str | None = None
+
     special_notes: list[str] = Field(default_factory=list)
 
-    source_url: str
+    source_url: str | None = None
 
     # Additional information useful for itinerary planning.
     address: str | None = None
@@ -70,6 +73,28 @@ class ActivityCollection(BaseModel):
 
     activities: list[Activity]
 
+
+class ActivityEnrichmentData(BaseModel):
+    """Additional information collected for an existing activity."""
+
+    id: str
+
+    location: str | None = None
+    estimated_duration_hours: float | None = Field(default=None, gt=0)
+    estimated_price: str | None = None
+    price_currency: str | None = None
+    address: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+    opening_hours: str | None = None
+    booking_required: bool | None = None
+    source_url: str | None = None
+
+
+class ActivityEnrichmentResult(BaseModel):
+    """Enrichment results for a batch of activities."""
+
+    activities: list[ActivityEnrichmentData]
 
 # ---------------------------------------------------------------------------
 # Trip preferences
@@ -635,3 +660,99 @@ class ItineraryPlanningInput(BaseModel):
             )
 
         return self
+
+
+#--------------------------------------
+#pricing
+#-------------------------------------
+
+class PriceRepresentation(BaseModel):
+    """One currency representation of a price."""
+
+    currency: str = Field(
+        description="ISO 4217 currency code."
+    )
+
+    minimum: float | None = Field(default=None, ge=0)
+    maximum: float | None = Field(default=None, ge=0)
+
+
+class PriceOption(BaseModel):
+    """One way to purchase or experience an activity."""
+
+    description: str | None = None
+
+    # Different currencies representing the same price
+    representations: list[PriceRepresentation] = Field(
+        default_factory=list
+    )
+
+    # Whether this is a verified price or an estimate
+    confidence: Literal[
+        "verified",
+        "estimated",
+        "unknown",
+    ] = "unknown"
+
+    # Per person, per group, per ticket, etc.
+    pricing_basis: Literal[
+        "per_person",
+        "per_group",
+        "per_ticket",
+        "per_vehicle",
+        "total",
+        "unknown",
+    ] = "unknown"
+
+    mandatory: bool = True
+
+
+class ActivityPricing(BaseModel):
+    """Pricing information for an activity."""
+
+    status: Literal[
+        "free",
+        "paid",
+        "partially_free",
+        "unknown",
+    ]
+
+    options: list[PriceOption] = Field(
+        default_factory=list
+    )
+
+class CostEstimate(BaseModel):
+    currency: str
+
+    minimum: float | None = None
+    maximum: float | None = None
+
+    has_unknown_costs: bool = False
+    has_estimated_prices: bool = False
+
+    exchange_rate_date: str | None = None
+
+class BudgetAssessment(BaseModel):
+    budget: float
+    currency: str
+
+    estimated_minimum: float | None = None
+    estimated_maximum: float | None = None
+
+    has_unknown_costs: bool = False
+
+    within_budget: bool
+    requires_replanning: bool
+
+
+class ActivityPricingItem(BaseModel):
+    """Pricing information associated with an activity."""
+
+    activity_id: str
+    pricing: ActivityPricing
+
+
+class ActivityPricingResult(BaseModel):
+    """Pricing extraction results for multiple activities."""
+
+    activities: list[ActivityPricingItem]

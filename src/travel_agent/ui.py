@@ -552,9 +552,11 @@ def _render_activity_card(
         for note in activity.get("special_notes", [])
     ]
     safe_source = html.escape(
-        activity.get("source_url", ""),
+        activity.get("source_url", "Not identified"),
         quote=True,
     )
+
+    safe_price = activity.get("estimated_price")
 
     with gr.Row(equal_height=True):
         with gr.Column(scale=1, min_width=220):
@@ -578,6 +580,10 @@ def _render_activity_card(
 
             gr.Markdown(
                 f"`{safe_category}` * {safe_location}"
+            )
+
+            gr.Markdown(
+                f"**Estimated price per person:** {safe_price}"
             )
 
             gr.Markdown(safe_description)

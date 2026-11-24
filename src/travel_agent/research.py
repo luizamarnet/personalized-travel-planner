@@ -24,7 +24,7 @@ from langchain_azure_ai.tools.builtin import WebSearchTool
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from langchain_core.messages import SystemMessage, HumanMessage
 
-from travel_agent.schemas import Activity, ActivityExtraction
+from travel_agent.schemas import Activity, ActivityData, ActivityEnrichmentResult, ActivityExtraction
 
 
 
@@ -298,6 +298,185 @@ def _enrich_activity_image(
     return activity
 
 
+def enriched_activity(
+    model: ChatOpenAI,
+    destination: str,
+    activities: list[ActivityData],
+) -> list[ActivityData]:
+
+    if not activities:
+        return []
+
+    research_model = model.bind_tools([WebSearchTool()])
+
+    activity_list = "\n".join(
+        f"- ID: {activity.id} | Name: {activity.name}"
+        for activity in activities
+    )
+
+    research_prompt = """
+    You are an experienced travel researcher.
+
+    Research ALL the activities provided.
+
+    Instructions:
+    - Use reliable sources whenever available.
+    - Prefer official attraction websites.
+    - Never invent missing information.
+    - Distinguish estimated values from verified facts.
+    - Ensure information refers to the exact attraction.
+    - Keep information about each attraction separate.
+    - Do not omit any requested activity.
+
+    Investigate:
+    - Location and address
+    - Estimated duration
+    - Estimated price per person and currency
+    - Latitude and longitude
+    - Opening hours for each weekday
+    - Booking requirements
+    - Source URL
+
+    For prices:
+    - Extract numeric values or ranges.
+    - Use ISO 4217 currency codes.
+    - Never assume a currency.
+
+    For unavailable information, state None.
+    Be conservative with estimated prices and durations.
+    """
+
+    research_result = research_model.invoke([
+        SystemMessage(content=research_prompt),
+        HumanMessage(content=f"""
+            Destination: {destination}
+
+            Research these activities individually:
+
+            {activity_list}
+
+            Clearly associate every finding with its activity ID.
+        """),
+    ])
+
+    research_text = "\n\n".join(
+        block["text"]
+        for block in research_result.content
+        if block.get("type") == "text" and block.get("text")
+    )
+
+    if not research_text:
+        raise ValueError("Research returned no textual results.")
+
+    logger.info(
+        "Research text length: %d characters",
+        len(research_text),
+    )
+
+    extraction_model = model.with_structured_output(
+        ActivityEnrichmentResult,
+        method="function_calling",
+        include_raw=True,
+    )
+
+    batch_size = 2
+    extracted_by_id: dict[str, ActivityEnrichmentData] = {}
+
+    for start in range(0, len(activities), batch_size):
+        batch = activities[start:start + batch_size]
+
+        batch_ids = {activity.id for activity in batch}
+
+        batch_description = "\n".join(
+            f"- ID: {activity.id} | Name: {activity.name}"
+            for activity in batch
+        )
+
+        logger.info(
+            "Extracting activity enrichment batch %d/%d.",
+            start // batch_size + 1,
+            (len(activities) + batch_size - 1) // batch_size,
+        )
+
+        extraction_result = extraction_model.invoke([
+            SystemMessage(content="""
+                Extract enrichment information from the research.
+
+                Return information ONLY for the activities explicitly
+                listed in the user message.
+
+                Rules:
+                - Preserve the exact original activity IDs.
+                - Do not create new activities.
+                - Do not include name, description or category.
+                - Do not mix information between attractions.
+                - Use only information supported by the research.
+                - Use null for unavailable optional fields.
+                - Keep opening hours concise but include each weekday
+                  when the information is available.
+            """),
+            HumanMessage(content=f"""
+                Activities to extract:
+
+                {batch_description}
+
+                Research:
+
+                {research_text}
+            """),
+        ])
+
+        raw = extraction_result["raw"]
+        parsed = extraction_result["parsed"]
+
+        logger.info(
+            "Batch extraction metadata: %s",
+            raw.response_metadata,
+        )
+
+        if parsed is None:
+            raise ValueError(
+                "Activity enrichment extraction failed for batch "
+                f"{start // batch_size + 1}. "
+                f"Finish reason: "
+                f"{raw.response_metadata.get('finish_reason')}"
+            )
+
+        for extracted in parsed.activities:
+            if extracted.id not in batch_ids:
+                logger.warning(
+                    "Ignoring unexpected activity ID: %s",
+                    extracted.id,
+                )
+                continue
+
+            extracted_by_id[extracted.id] = extracted
+
+    enriched_activities = []
+
+    for original in activities:
+        extracted = extracted_by_id.get(original.id)
+
+        if extracted is None:
+            enriched_activities.append(original)
+            continue
+
+        enriched_data = extracted.model_dump(
+            exclude_unset=True,
+            exclude_none=True,
+            exclude={"id"},
+        )
+
+        enriched_activities.append(
+            ActivityData.model_validate({
+                **original.model_dump(),
+                **enriched_data,
+            })
+        )
+
+    return enriched_activities
+
+    
 def search_activities(
     destination: str,
     preferences: dict,
@@ -438,6 +617,14 @@ def search_activities(
     # Step 4: Search and download images individually.
     enriched_activities: list[Activity] = []
 
+    print("activities.activities 0: ")
+    print(activities.activities)
+    activities.activities = enriched_activity(model, destination, activities.activities)
+    '''for index, activity in enumerate(activities.activities):
+
+        activity_aux = enriched_activity(model, destination, activity)
+        activities.activities[index] = activity_aux'''
+
     '''url_extraction_model = research_model
     
     for index, activity in enumerate(activities.activities, start=1):
@@ -460,3 +647,6 @@ def search_activities(
     print("activities.activities")
     print(activities.activities)
     return activities.activities #enriched_activities
+
+
+

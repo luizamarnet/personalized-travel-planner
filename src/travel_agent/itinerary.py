@@ -26,6 +26,7 @@ from travel_agent.schemas import (
     Preference,
     _validate_schedule_overlaps,
 )
+from travel_agent.pricing import extract_activity_pricing
 
 logger = logging.getLogger(__name__)
 
@@ -1286,6 +1287,7 @@ def _generate_itinerary_outline(
         method="function_calling",
     )
 
+
     for attempt in range(1, MAX_GENERATION_ATTEMPTS + 1):
         logger.info(
             "Generating itinerary outline, attempt %d/%d.",
@@ -1420,7 +1422,7 @@ def generate_itinerary(
         model = _build_chat_model()
 
         # 1. Generate and validate the complete activity allocation.
-        yield "Planning the distribution of activities across your trip..."
+        yield "Planning the distribution of activities across your trip"
 
         itinerary_outline = _generate_itinerary_outline(
             model=model,
@@ -1438,7 +1440,7 @@ def generate_itinerary(
             yield (
                 f"Generating daily schedule: "
                 f"day {index}/{total_days} "
-                f"({day_outline.date.strftime('%d %b %Y')})..."
+                f"({day_outline.date.strftime('%d %b %Y')})"
             )
 
             day_plan = _generate_daily_schedule(
