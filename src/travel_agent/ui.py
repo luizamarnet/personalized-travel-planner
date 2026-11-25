@@ -273,8 +273,8 @@ def discover_activities(
         "arrival_mode",
         "departure_mode",
         "preferred_area",
-        #"currency",
-        #"activities_budget",
+        "currency",
+        "activities_budget",
         "interests",
         "things_to_avoid",
         "meals_per_day",
@@ -784,7 +784,7 @@ def build_app() -> gr.Blocks:
         
         # D. Budget
 
-        '''gr.Markdown("## D · Budget")
+        gr.Markdown("## D · Budget")
 
         currency = gr.Dropdown(
             choices=currencies,
@@ -797,7 +797,7 @@ def build_app() -> gr.Blocks:
         activities_budget = gr.Number(
             label="Activities whole-trip ceiling",
             minimum=0,
-        )'''
+        )
 
     
 
@@ -903,8 +903,8 @@ def build_app() -> gr.Blocks:
             arrival_mode,
             departure_mode,
             preferred_area,
-            #currency,
-            #activities_budget,
+            currency,
+            activities_budget,
             interests,
             things_to_avoid,
             meals_per_day,

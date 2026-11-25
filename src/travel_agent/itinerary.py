@@ -24,9 +24,12 @@ from travel_agent.schemas import (
     ItineraryPlanningInput,
     ItineraryOutline,
     Preference,
+    TripPreferences,
     _validate_schedule_overlaps,
 )
+
 from travel_agent.pricing import extract_activity_pricing
+from travel_agent.currency import convert_activity_pricing
 
 logger = logging.getLogger(__name__)
 
@@ -606,6 +609,89 @@ The result must be a practical daily schedule that the user
 could follow, not merely a collection of recommendations.
 """
 
+def _get_activity_cost_range(
+    activity,
+    target_currency: str,
+    traveler_count: int,
+) -> tuple[float | None, float | None, bool]:
+    """Return the activity's estimated group cost range."""
+
+    pricing = activity.pricing
+
+    if pricing is None or pricing.status == "unknown":
+        return None, None, True
+
+    if pricing.status == "free":
+        return 0.0, 0.0, False
+
+    option_ranges = []
+    has_unknown_costs = False
+
+    for option in pricing.options:
+        if option.pricing_basis != "per_person":
+            has_unknown_costs = True
+            continue
+
+        matching_prices = [
+            representation
+            for representation in option.representations
+            if (
+                representation.converted_currency == target_currency
+                and representation.conversion_status
+                in {"converted", "same_currency"}
+            )
+        ]
+
+        if not matching_prices:
+            has_unknown_costs = True
+            continue
+
+        # Different representations of the same option are
+        # alternative currency representations, not separate costs.
+        price = matching_prices[0]
+
+        minimum = price.converted_minimum
+        maximum = price.converted_maximum
+
+        if minimum is None and maximum is None:
+            has_unknown_costs = True
+            continue
+
+        option_ranges.append(
+            (
+                minimum * traveler_count if minimum is not None else None,
+                maximum * traveler_count if maximum is not None else None,
+            )
+        )
+
+        if minimum is None or maximum is None:
+            has_unknown_costs = True
+
+    if not option_ranges:
+        return None, None, True
+
+    # PriceOptions represent alternative ways to experience
+    # or purchase the activity, so they must not be summed.
+    known_minimums = [
+        minimum
+        for minimum, _ in option_ranges
+        if minimum is not None
+    ]
+
+    known_maximums = [
+        maximum
+        for _, maximum in option_ranges
+        if maximum is not None
+    ]
+
+    minimum_total = min(known_minimums) if known_minimums else None
+    maximum_total = max(known_maximums) if known_maximums else None
+
+    if pricing.status == "partially_free":
+        minimum_total = 0.0
+
+    return minimum_total, maximum_total, has_unknown_costs
+
 
 def _validate_itinerary_outline(
     outline: ItineraryOutline,
@@ -763,6 +849,109 @@ def _validate_itinerary_outline(
             "or included in unplanned_activity_ids: "
             f"{sorted(missing_activity_ids)}."
         )
+
+
+    # 9.1. Validate the activity budget.
+    activity_budget = _calculate_activities_budget(preferences)
+    target_currency = (
+        preferences.currency or "EUR"
+    ).upper()
+
+    if activity_budget is not None:
+        if not target_currency:
+            warning = (
+                "The activity budget could not be validated because "
+                "no target currency was selected."
+            )
+            if warning not in outline.warnings:
+                outline.warnings.append(warning)
+
+        else:
+            traveler_count = preferences.adults + preferences.children
+
+            activities_by_id = {
+                activity.id: activity
+                for activity in planning_input.activities
+            }
+
+            assigned_activities = [
+                activities_by_id[activity_id]
+                for activity_id in assigned_activity_ids
+            ]
+
+            estimated_minimum = 0.0
+            estimated_maximum = 0.0
+            has_unknown_costs = False
+            has_known_costs = False
+
+            for activity in assigned_activities:
+                minimum, maximum, unknown = _get_activity_cost_range(
+                    activity=activity,
+                    target_currency=target_currency,
+                    traveler_count=traveler_count,
+                )
+
+                has_unknown_costs = has_unknown_costs or unknown
+
+                if minimum is not None:
+                    estimated_minimum += minimum
+                    has_known_costs = True
+                else:
+                    has_unknown_costs = True
+
+                if maximum is not None:
+                    estimated_maximum += maximum
+                else:
+                    has_unknown_costs = True
+
+            if not has_known_costs:
+                warning = (
+                    "The activity budget could not be reliably evaluated "
+                    "because no comparable activity prices are available."
+                )
+                if warning not in outline.warnings:
+                    outline.warnings.append(warning)
+
+            elif estimated_minimum > activity_budget:
+                raise ValueError(
+                    f"The minimum known activity cost "
+                    f"({estimated_minimum:.2f} {target_currency}) "
+                    f"exceeds the available activity budget "
+                    f"({activity_budget:.2f} {target_currency}). "
+                    "Redistribute activities to fit the budget."
+                )
+
+            else:
+                if estimated_maximum > activity_budget:
+                    warning = (
+                        f"The estimated activity cost may exceed the "
+                        f"available budget of {activity_budget:.2f} "
+                        f"{target_currency}. The known minimum is "
+                        f"{estimated_minimum:.2f} {target_currency}, "
+                        f"but the estimated maximum is "
+                        f"{estimated_maximum:.2f} {target_currency}."
+                    )
+                    if warning not in outline.warnings:
+                        outline.warnings.append(warning)
+
+                if has_unknown_costs:
+                    warning = (
+                        "Some activity costs are unknown or could not "
+                        "be converted. The budget assessment is incomplete."
+                    )
+                    if warning not in outline.warnings:
+                        outline.warnings.append(warning)
+
+                logger.info(
+                    "Activity budget assessment: minimum %.2f, "
+                    "maximum %.2f, budget %.2f %s.",
+                    estimated_minimum,
+                    estimated_maximum,
+                    activity_budget,
+                    target_currency,
+                )
+
+
 
     # 10. Warn when high-priority activities remain unplanned.
     activities_by_id = {
@@ -931,6 +1120,121 @@ def _validate_generated_day(
 
     return day_plan
 
+def _get_activity_price_range(
+    activity: Activity,
+    target_currency: str,
+) -> tuple[float | None, float | None]:
+    """Return the reliable per-person price range in the target currency."""
+
+    pricing = activity.pricing
+
+    if pricing is None or pricing.status == "unknown":
+        return None, None
+
+    if pricing.status == "free":
+        return 0.0, 0.0
+
+    option_ranges = []
+    has_unknown_option = False
+
+    for option in pricing.options:
+
+        # Only per-person prices can be used directly.
+        if option.pricing_basis != "per_person":
+            has_unknown_option = True
+            continue
+
+        representation = next(
+            (
+                price
+                for price in option.representations
+                if (
+                    price.converted_currency == target_currency
+                    and price.conversion_status
+                    in {"converted", "same_currency"}
+                )
+            ),
+            None,
+        )
+
+        if representation is None:
+            has_unknown_option = True
+            continue
+
+        minimum = representation.converted_minimum
+        maximum = representation.converted_maximum
+
+        if minimum is None or maximum is None:
+            has_unknown_option = True
+            continue
+
+        option_ranges.append((minimum, maximum))
+
+    if not option_ranges:
+        return None, None
+
+    # Price options are alternatives, not additive costs.
+    minimum = min(
+        price_minimum
+        for price_minimum, _ in option_ranges
+    )
+
+    maximum = max(
+        price_maximum
+        for _, price_maximum in option_ranges
+    )
+
+    # An unknown alternative could be cheaper than the known options.
+    # Do not claim a reliable minimum in that case.
+    if has_unknown_option:
+        minimum = None
+
+    if pricing.status == "partially_free":
+        minimum = 0.0
+
+    return minimum, maximum
+
+
+def _enrich_activity_item_cost(
+    item: ItineraryItem,
+    activity: Activity,
+    target_currency: str | None,
+    traveler_count: int,
+) -> None:
+    """Populate an itinerary item with verified activity costs."""
+
+    if not target_currency:
+        return
+
+    minimum, maximum = _get_activity_price_range(
+        activity=activity,
+        target_currency=target_currency.upper(),
+    )
+
+    if minimum is None and maximum is None:
+        return
+
+    item.currency = target_currency.upper()
+
+    item.estimated_cost_per_person_minimum = minimum
+    item.estimated_cost_per_person_maximum = maximum
+
+    if minimum is not None:
+        item.estimated_cost_total_minimum = (
+            minimum * traveler_count
+        )
+
+    if maximum is not None:
+        item.estimated_cost_total_maximum = (
+            maximum * traveler_count
+        )
+
+    # Populate the scalar fields only for an exact price.
+    if minimum is not None and minimum == maximum:
+        item.estimated_cost_per_person = minimum
+        item.estimated_cost_total = minimum * traveler_count
+
+
 def _validate_generated_itinerary(
     itinerary: Itinerary,
     planning_input: ItineraryPlanningInput,
@@ -938,6 +1242,12 @@ def _validate_generated_itinerary(
     """Validate and enrich the generated itinerary."""
 
     preferences = planning_input.preferences
+
+    traveler_count = preferences.adults + preferences.children
+
+    target_currency = (
+        preferences.currency or "EUR"
+    ).upper()
 
     # Reject mismatches before restoring canonical values.
     if itinerary.destination != planning_input.destination:
@@ -1047,6 +1357,13 @@ def _validate_generated_itinerary(
                     else activity.longitude
                 )
 
+                _enrich_activity_item_cost(
+                    item=item,
+                    activity=activity,
+                    target_currency=target_currency,
+                    traveler_count=traveler_count,
+                )
+
             elif item.activity_id is not None:
                 raise ValueError(
                     f"Only ACTIVITY items can reference activity_id. "
@@ -1057,6 +1374,111 @@ def _validate_generated_itinerary(
 
 
         day.items = valid_items
+
+        # Aggregate scheduled activity costs for the entire trip.
+        activity_items = [
+            item
+            for day in itinerary.days
+            for item in day.items
+            if item.item_type == ItineraryItemType.ACTIVITY
+        ]
+
+        if activity_items:
+            per_person_minimums = [
+                item.estimated_cost_per_person_minimum
+                for item in activity_items
+            ]
+            per_person_maximums = [
+                item.estimated_cost_per_person_maximum
+                for item in activity_items
+            ]
+
+            total_minimums = [
+                item.estimated_cost_total_minimum
+                for item in activity_items
+            ]
+            total_maximums = [
+                item.estimated_cost_total_maximum
+                for item in activity_items
+            ]
+
+            itinerary.activity_costs_incomplete = any(
+                value is None
+                for values in (
+                    per_person_minimums,
+                    per_person_maximums,
+                )
+                for value in values
+            )
+
+            itinerary.currency = target_currency
+
+            itinerary.estimated_cost_per_person_minimum = (
+                sum(per_person_minimums)
+                if all(value is not None for value in per_person_minimums)
+                else None
+            )
+
+            itinerary.estimated_cost_per_person_maximum = (
+                sum(per_person_maximums)
+                if all(value is not None for value in per_person_maximums)
+                else None
+            )
+
+            itinerary.estimated_cost_total_minimum = (
+                sum(total_minimums)
+                if all(value is not None for value in total_minimums)
+                else None
+            )
+
+            itinerary.estimated_cost_total_maximum = (
+                sum(total_maximums)
+                if all(value is not None for value in total_maximums)
+                else None
+            )
+
+            # Populate scalar values only when the estimate is exact.
+            itinerary.estimated_cost_per_person = (
+                itinerary.estimated_cost_per_person_minimum 
+                or
+                itinerary.estimated_cost_per_person_maximum
+            )
+            
+            itinerary.estimated_cost_total = (
+                itinerary.estimated_cost_total_minimum
+                or
+                itinerary.estimated_cost_total_maximum
+            )
+                
+            
+            # Perform a final activity budget validation.
+            activity_budget = _calculate_activities_budget(preferences)
+
+            if activity_budget is not None and activity_items:
+                minimum = itinerary.estimated_cost_total_minimum
+                maximum = itinerary.estimated_cost_total_maximum
+
+                if minimum is not None and minimum > activity_budget:
+                    raise ItineraryGenerationError(
+                        f"The final scheduled activity cost "
+                        f"({minimum:.2f} {target_currency}) exceeds "
+                        f"the available activity budget "
+                        f"({activity_budget:.2f} {target_currency})."
+                    )
+                
+
+                if maximum is not None and maximum > activity_budget:
+                    warning = (
+                        f"The final estimated activity cost may exceed "
+                        f"the available activity budget of "
+                        f"{activity_budget:.2f} {target_currency}. "
+                        f"The estimated maximum is "
+                        f"{maximum:.2f} {target_currency}."
+                    )
+
+                    if warning not in itinerary.warnings:
+                        itinerary.warnings.append(warning)
+            
 
     # Validate unplanned activity references.
     known_activity_ids = set(activities_by_id)
@@ -1274,13 +1696,53 @@ def _build_daily_schedule_generation_messages(
         HumanMessage(content=user_content),
     ]
 
+def _calculate_activities_budget(
+    preferences: TripPreferences,
+) -> float | None:
+    """Calculate the budget available for activities."""
+
+    if preferences.activities_budget is not None:
+        return preferences.activities_budget
+
+    total_budget = preferences.total_budget
+
+    if total_budget is None:
+        return None
+
+    food_budget = preferences.food_budget
+    accommodation_budget = preferences.accommodation_budget
+
+    if food_budget is not None and accommodation_budget is not None:
+        return total_budget - food_budget - accommodation_budget
+
+    if food_budget is not None:
+        return (total_budget - food_budget) / 2
+
+    if accommodation_budget is not None:
+        return (total_budget - accommodation_budget) / 2
+
+    return total_budget / 3
+
 
 def _generate_itinerary_outline(
     model: ChatOpenAI,
     planning_input: ItineraryPlanningInput,
+    previous_issues: list[str] = [],
 ) -> ItineraryOutline:
 
-    previous_issues: list[str] = []
+
+    budget = _calculate_activities_budget(
+        planning_input.preferences
+    )
+
+    if budget is not None and budget < 0:
+        raise ValueError(
+            "The allocated budgets exceed the total trip budget."
+        )
+    
+    
+
+    
 
     structured_model = model.with_structured_output(
         ItineraryOutline,
@@ -1419,69 +1881,126 @@ def generate_itinerary(
     )
 
     try:
+
+        previous_issues: list[str] = []
+
         model = _build_chat_model()
 
-        # 1. Generate and validate the complete activity allocation.
-        yield "Planning the distribution of activities across your trip"
+        yield "Researching activity prices..."
 
-        itinerary_outline = _generate_itinerary_outline(
-            model=model,
-            planning_input=planning_input,
+        priced_activities = extract_activity_pricing(
+            llm=model,
+            activities=planning_input.activities,
         )
 
-        # 2. Generate each daily schedule independently.
-        generated_days: list[DayPlan] = []
-        total_days = len(itinerary_outline.days)
+        yield "Converting prices to your selected currency..."
 
-        for index, day_outline in enumerate(
-            itinerary_outline.days,
-            start=1,
-        ):
-            yield (
-                f"Generating daily schedule: "
-                f"day {index}/{total_days} "
-                f"({day_outline.date.strftime('%d %b %Y')})"
-            )
+        target_currency = (
+            planning_input.preferences.currency or "EUR"
+        ).upper()
 
-            day_plan = _generate_daily_schedule(
-                model=model,
-                planning_input=planning_input,
-                itinerary_outline=itinerary_outline,
-                day_outline=day_outline,
-                previous_days=generated_days,
-            )
-
-            generated_days.append(day_plan)
-
-        # 3. Assemble the complete itinerary.
-        yield "Assembling your complete itinerary..."
-
-        itinerary = Itinerary(
-            destination=planning_input.destination,
-            timezone=planning_input.timezone,
-            start_date=planning_input.preferences.arrival_date,
-            end_date=planning_input.preferences.departure_date,
-            days=generated_days,
-            unplanned_activity_ids=itinerary_outline.unplanned_activity_ids,
-            warnings=itinerary_outline.warnings,
+        converted_activities = convert_activity_pricing(
+            activities=priced_activities,
+            target_currency=target_currency,
         )
 
-        # 4. Validate the complete itinerary locally.
-        yield "Validating your itinerary..."
-
-        itinerary = _validate_generated_itinerary(
-            itinerary=itinerary,
-            planning_input=planning_input,
+        planning_input = planning_input.model_copy(
+            update={"activities": converted_activities}
         )
 
-        # 5. Perform the final semantic review.
-        yield "Reviewing itinerary consistency..."
+        for attempt in range(1, MAX_GENERATION_ATTEMPTS + 1 + 2):
+                
+            try :
 
-        review = _review_itinerary(
-            model=model,
-            itinerary=itinerary,
-            planning_input=planning_input,
-        )
+                logger.info(
+                    f'''Starting the distribution of activities, attempt {attempt}
+                    {MAX_GENERATION_ATTEMPTS}. \n
+                    Planning the distribution of activities across your trip'''
+                )
+                # 1. Generate and validate the complete activity allocation.
+                yield (f'''Starting the distribution of activities, attempt {attempt}
+                                {MAX_GENERATION_ATTEMPTS}. \n
+                                Planning the distribution of activities across your trip''')
+
+                itinerary_outline = _generate_itinerary_outline(
+                    model=model,
+                    planning_input=planning_input,
+                    previous_issues = previous_issues,
+                )
+
+                # 2. Generate each daily schedule independently.
+                generated_days: list[DayPlan] = []
+                total_days = len(itinerary_outline.days)
+
+                for index, day_outline in enumerate(
+                    itinerary_outline.days,
+                    start=1,
+                ):
+                    yield (
+                        f"Generating daily schedule: "
+                        f"day {index}/{total_days} "
+                        f"({day_outline.date.strftime('%d %b %Y')})"
+                    )
+
+                    day_plan = _generate_daily_schedule(
+                        model=model,
+                        planning_input=planning_input,
+                        itinerary_outline=itinerary_outline,
+                        day_outline=day_outline,
+                        previous_days=generated_days,
+                    )
+
+                    generated_days.append(day_plan)
+
+                # 3. Assemble the complete itinerary.
+                yield "Assembling your complete itinerary..."
+
+                itinerary = Itinerary(
+                    destination=planning_input.destination,
+                    timezone=planning_input.timezone,
+                    start_date=planning_input.preferences.arrival_date,
+                    end_date=planning_input.preferences.departure_date,
+                    days=generated_days,
+                    unplanned_activity_ids=itinerary_outline.unplanned_activity_ids,
+                    warnings=itinerary_outline.warnings,
+                )
+
+                # 4. Validate the complete itinerary locally.
+                yield "Validating your itinerary..."
+
+                itinerary = _validate_generated_itinerary(
+                    itinerary=itinerary,
+                    planning_input=planning_input,
+                )
+
+                # 5. Perform the final semantic review.
+                yield "Reviewing itinerary consistency..."
+
+                review = _review_itinerary(
+                    model=model,
+                    itinerary=itinerary,
+                    planning_input=planning_input,
+                )
+
+                if not review.is_valid:
+                    raise ItineraryGenerationError (review.issues)
+
+                
+            
+            except ItineraryGenerationError as issue:
+                previous_issues = [
+                    f"Attempt {attempt} failed: {issue}"
+                ]
+    
+                logger.warning(
+                    f'''Itinerary generation failed 
+                    on attempt {attempt}/{MAX_GENERATION_ATTEMPTS}.
+                    Issue: {issue}'''
+                )
+
+            else:
+                if review.is_valid:
+                    break
 
         if not review.is_valid:
             raise ItineraryGenerationError(

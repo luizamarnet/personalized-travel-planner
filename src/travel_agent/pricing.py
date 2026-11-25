@@ -6,11 +6,14 @@ from langchain.agents.structured_output import ToolStrategy
 from langchain_openai import ChatOpenAI
 
 from travel_agent.schemas import (
+    Activity,
     ActivityData,
     ActivityPricing,
     ActivityPricingItem,
     ActivityPricingResult,
 )
+
+
 
 logger = logging.getLogger(__name__)
 
@@ -58,8 +61,8 @@ def create_pricing_agent(llm: ChatOpenAI):
 
 def extract_activity_pricing(
     llm: ChatOpenAI,
-    activities: list[ActivityData],
-) -> list[ActivityData]:
+    activities: list[Activity],
+) -> list[Activity]:
     """Extract structured pricing information for activities."""
 
     if not activities:

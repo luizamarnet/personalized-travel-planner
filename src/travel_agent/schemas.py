@@ -10,6 +10,125 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator, field_validator
 
 
+#--------------------------------------
+#pricing
+#-------------------------------------
+
+class PriceRepresentation(BaseModel):
+    """Price expressed in its original currency and, when possible, in the user's currency."""
+
+    # Original price found in the source.
+    currency: str = Field(description="Original ISO 4217 currency code.")
+    minimum: float | None = Field(default=None, ge=0)
+    maximum: float | None = Field(default=None, ge=0)
+
+    # Converted price.
+    converted_currency: str | None = Field(
+        default=None,
+        description="Target ISO 4217 currency code selected by the user.",
+    )
+    converted_minimum: float | None = Field(default=None, ge=0)
+    converted_maximum: float | None = Field(default=None, ge=0)
+
+    # Conversion metadata.
+    exchange_rate: float | None = Field(default=None, gt=0)
+    exchange_rate_date: str | None = None
+    conversion_status: Literal[
+        "not_requested",
+        "same_currency",
+        "converted",
+        "unavailable",
+    ] = "not_requested"
+
+  
+    source_currency: str | None = None
+    
+    
+
+class PriceOption(BaseModel):
+    """One way to purchase or experience an activity."""
+
+    description: str | None = None
+
+    # Different currencies representing the same price
+    representations: list[PriceRepresentation] = Field(
+        default_factory=list
+    )
+
+    # Whether this is a verified price or an estimate
+    confidence: Literal[
+        "verified",
+        "estimated",
+        "unknown",
+    ] = "unknown"
+
+    # Per person, per group, per ticket, etc.
+    pricing_basis: Literal[
+        "per_person",
+        "per_group",
+        "per_ticket",
+        "per_vehicle",
+        "total",
+        "unknown",
+    ] = "unknown"
+
+    mandatory: bool = True
+
+    converted_representations: list[PriceRepresentation] = Field(
+        default_factory=list
+    )
+
+
+class ActivityPricing(BaseModel):
+    """Pricing information for an activity."""
+
+    status: Literal[
+        "free",
+        "paid",
+        "partially_free",
+        "unknown",
+    ]
+
+    options: list[PriceOption] = Field(
+        default_factory=list
+    )
+
+class CostEstimate(BaseModel):
+    currency: str
+
+    minimum: float | None = None
+    maximum: float | None = None
+
+    has_unknown_costs: bool = False
+    has_estimated_prices: bool = False
+
+    exchange_rate_date: str | None = None
+
+class BudgetAssessment(BaseModel):
+    budget: float
+    currency: str
+
+    estimated_minimum: float | None = None
+    estimated_maximum: float | None = None
+
+    has_unknown_costs: bool = False
+
+    within_budget: bool
+    requires_replanning: bool
+
+
+class ActivityPricingItem(BaseModel):
+    """Pricing information associated with an activity."""
+
+    activity_id: str
+    pricing: ActivityPricing
+
+
+class ActivityPricingResult(BaseModel):
+    """Pricing extraction results for multiple activities."""
+
+    activities: list[ActivityPricingItem]
+
 # ---------------------------------------------------------------------------
 # Activity discovery and user preferences
 # ---------------------------------------------------------------------------
@@ -66,7 +185,7 @@ class Activity(ActivityData):
     image_url: str | None = None
     image_path: str | None = None
     preference: Preference | None = None
-
+    pricing: ActivityPricing | None = None
 
 class ActivityCollection(BaseModel):
     """Validated collection of complete activities."""
@@ -397,6 +516,36 @@ class ItineraryItem(BaseModel):
 
     notes: list[str] = Field(default_factory=list)
 
+    # Estimated costs per person.
+    estimated_cost_per_person: float | None = Field(
+        default=None,
+        ge=0,
+    )
+    estimated_cost_per_person_minimum: float | None = Field(
+        default=None,
+        ge=0,
+    )
+    estimated_cost_per_person_maximum: float | None = Field(
+        default=None,
+        ge=0,
+    )
+
+    # Estimated costs for the entire group.
+    estimated_cost_total: float | None = Field(
+        default=None,
+        ge=0,
+    )
+    estimated_cost_total_minimum: float | None = Field(
+        default=None,
+        ge=0,
+    )
+    estimated_cost_total_maximum: float | None = Field(
+        default=None,
+        ge=0,
+    )
+
+    currency: str | None = None
+
     @model_validator(mode="after")
     def validate_item(self) -> ItineraryItem:
         """Validate item-specific constraints."""
@@ -546,17 +695,18 @@ class Itinerary(BaseModel):
         default_factory=list
     )
 
-    estimated_cost_per_person: float | None = Field(
-        default=None,
-        ge=0,
-    )
+    # Estimated activity costs.
+    estimated_cost_per_person: float | None = Field(default=None, ge=0)
+    estimated_cost_per_person_minimum: float | None = Field(default=None, ge=0)
+    estimated_cost_per_person_maximum: float | None = Field(default=None, ge=0)
 
-    estimated_cost_total: float | None = Field(
-        default=None,
-        ge=0,
-    )
+    estimated_cost_total: float | None = Field(default=None, ge=0)
+    estimated_cost_total_minimum: float | None = Field(default=None, ge=0)
+    estimated_cost_total_maximum: float | None = Field(default=None, ge=0)
 
     currency: str | None = None
+
+    activity_costs_incomplete: bool = False
 
     warnings: list[str] = Field(default_factory=list)
 
@@ -662,97 +812,3 @@ class ItineraryPlanningInput(BaseModel):
         return self
 
 
-#--------------------------------------
-#pricing
-#-------------------------------------
-
-class PriceRepresentation(BaseModel):
-    """One currency representation of a price."""
-
-    currency: str = Field(
-        description="ISO 4217 currency code."
-    )
-
-    minimum: float | None = Field(default=None, ge=0)
-    maximum: float | None = Field(default=None, ge=0)
-
-
-class PriceOption(BaseModel):
-    """One way to purchase or experience an activity."""
-
-    description: str | None = None
-
-    # Different currencies representing the same price
-    representations: list[PriceRepresentation] = Field(
-        default_factory=list
-    )
-
-    # Whether this is a verified price or an estimate
-    confidence: Literal[
-        "verified",
-        "estimated",
-        "unknown",
-    ] = "unknown"
-
-    # Per person, per group, per ticket, etc.
-    pricing_basis: Literal[
-        "per_person",
-        "per_group",
-        "per_ticket",
-        "per_vehicle",
-        "total",
-        "unknown",
-    ] = "unknown"
-
-    mandatory: bool = True
-
-
-class ActivityPricing(BaseModel):
-    """Pricing information for an activity."""
-
-    status: Literal[
-        "free",
-        "paid",
-        "partially_free",
-        "unknown",
-    ]
-
-    options: list[PriceOption] = Field(
-        default_factory=list
-    )
-
-class CostEstimate(BaseModel):
-    currency: str
-
-    minimum: float | None = None
-    maximum: float | None = None
-
-    has_unknown_costs: bool = False
-    has_estimated_prices: bool = False
-
-    exchange_rate_date: str | None = None
-
-class BudgetAssessment(BaseModel):
-    budget: float
-    currency: str
-
-    estimated_minimum: float | None = None
-    estimated_maximum: float | None = None
-
-    has_unknown_costs: bool = False
-
-    within_budget: bool
-    requires_replanning: bool
-
-
-class ActivityPricingItem(BaseModel):
-    """Pricing information associated with an activity."""
-
-    activity_id: str
-    pricing: ActivityPricing
-
-
-class ActivityPricingResult(BaseModel):
-    """Pricing extraction results for multiple activities."""
-
-    activities: list[ActivityPricingItem]

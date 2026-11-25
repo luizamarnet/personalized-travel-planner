@@ -5,7 +5,7 @@ from datetime import date, datetime
 from html import escape
 from urllib.parse import urlparse
 
-from travel_agent.schemas import Itinerary
+from travel_agent.schemas import Itinerary, ItineraryItemType
 
 
 ITEM_STYLES = {
@@ -56,6 +56,102 @@ def _format_time(value) -> str:
 
     return value.strftime("%H:%M")
 
+def _format_price(value: float) -> str:
+    """Format a price without unnecessary decimal places."""
+
+    return f"{value:,.2f}".rstrip("0").rstrip(".")
+
+def _format_item_type(item_type: ItineraryItemType) -> str:
+    """Return a human-readable itinerary item type."""
+
+    labels = {
+        ItineraryItemType.ACTIVITY: "Activity",
+        ItineraryItemType.TRANSPORT: "Transport",
+        ItineraryItemType.MEAL: "Meal",
+        ItineraryItemType.FREE_TIME: "Free Time",
+        ItineraryItemType.ACCOMMODATION: "Accommodation",
+    }
+
+    return labels[item_type]
+
+def _render_cost(item) -> str:
+    """Render per-person and group cost estimates."""
+
+    currency = _safe_text(item.currency or "")
+
+    if item.estimated_cost_per_person_minimum == 0 and (
+        item.estimated_cost_per_person_maximum == 0
+    ):
+        return '<p class="cost">Free</p>'
+
+    per_person_min = item.estimated_cost_per_person_minimum
+    per_person_max = item.estimated_cost_per_person_maximum
+
+    total_min = item.estimated_cost_total_minimum
+    total_max = item.estimated_cost_total_maximum
+
+    if (
+        per_person_min is None
+        and per_person_max is None
+        and item.estimated_cost_per_person is None
+    ):
+        return ""
+
+    if (
+        per_person_min is not None
+        and per_person_max is not None
+        and per_person_min == per_person_max
+    ):
+        per_person_text = _format_price(per_person_min)
+    elif per_person_min is not None and per_person_max is not None:
+        per_person_text = (
+            f"{_format_price(per_person_min)}–"
+            f"{_format_price(per_person_max)}"
+        )
+    elif per_person_min is not None:
+        per_person_text = f"From {_format_price(per_person_min)}"
+    elif per_person_max is not None:
+        per_person_text = f"Up to {_format_price(per_person_max)}"
+    else:
+        per_person_text = _format_price(
+            item.estimated_cost_per_person
+        )
+
+    result = (
+        f'<div class="cost">'
+        f'<p>Estimated per person: '
+        f'{currency} {per_person_text}</p>'
+    )
+
+    if total_min is not None and total_max is not None:
+        if total_min == total_max:
+            total_text = _format_price(total_min)
+        else:
+            total_text = (
+                f"{_format_price(total_min)}–"
+                f"{_format_price(total_max)}"
+            )
+
+        result += (
+            f'<p>Estimated group total: '
+            f'{currency} {total_text}</p>'
+        )
+
+    elif total_min is not None:
+        result += (
+            f'<p>Estimated group total: '
+            f'from {currency} {_format_price(total_min)}</p>'
+        )
+
+    elif total_max is not None:
+        result += (
+            f'<p>Estimated group total: '
+            f'up to {currency} {_format_price(total_max)}</p>'
+        )
+
+    result += "</div>"
+
+    return result
 
 def _render_item(item) -> str:
     item_type = getattr(item.item_type, "value", item.item_type)
@@ -146,13 +242,7 @@ def _render_item(item) -> str:
                 'have not been added yet.</p>'
             )
 
-    cost = ""
-    if item.estimated_cost_per_person is not None:
-        currency = _safe_text(item.currency or "")
-        cost = (
-            f'<p class="cost">Estimated cost per person: '
-            f'{currency} {_safe_text(item.estimated_cost_per_person)}</p>'
-        )
+    cost = _render_cost(item)
 
     return f"""
     <article class="timeline-item {css_class}">
@@ -164,7 +254,7 @@ def _render_item(item) -> str:
         <div class="timeline-content">
             <div class="item-heading">
                 <span class="item-icon">{icon}</span>
-                <h3>{_safe_text(item.title)}</h3>
+                <h3>{_safe_text(item.title)} - {_format_item_type(item.item_type)}</h3>
             </div>
 
             <p>{_safe_text(item.description)}</p>
@@ -369,9 +459,44 @@ def render_itinerary_html(itinerary: Itinerary) -> str:
                 font-weight: 600;
             }
 
-            .restaurant, .cost {
+            .restaurant {
                 font-size: 13px;
                 font-weight: 600;
+            }
+
+            .cost {
+                margin-top: 12px;
+                padding: 10px 12px;
+                border-radius: 8px;
+                background: var(--block-background-fill);
+                font-size: 13px;
+            }
+
+            .cost p {
+                margin: 3px 0;
+            }
+
+            .cost p:first-child {
+                font-weight: 700;
+            }
+
+            
+            .activities-cost {
+                margin-top: 18px;
+                padding: 12px 16px;
+                border-radius: 10px;
+                background: var(--background-fill-secondary);
+            }
+
+            .activities-cost p {
+                font-size: 20px;
+                font-weight: 700;
+                margin: 5px 0;
+            }
+
+            .cost-note {
+                font-size: 12px;
+                color: var(--body-text-color-subdued);
             }
 
             @media (min-width: 650px) {
@@ -400,8 +525,47 @@ def render_itinerary_html(itinerary: Itinerary) -> str:
                     margin-bottom: 8px;
                 }
             }
+
+
+
         </style>
     """
+
+    activities_cost = ""
+
+    minimum = itinerary.estimated_cost_total_minimum
+    maximum = itinerary.estimated_cost_total_maximum
+    currency = _safe_text(itinerary.currency or "")
+
+    if minimum is not None or maximum is not None:
+        if minimum is not None and maximum is not None:
+            if minimum == maximum:
+                cost_text = _format_price(minimum)
+            else:
+                cost_text = (
+                    f"{_format_price(minimum)}–"
+                    f"{_format_price(maximum)}"
+                )
+        elif minimum is not None:
+            cost_text = f"From {_format_price(minimum)}"
+        else:
+            cost_text = f"Up to {_format_price(maximum)}"
+
+        incomplete_note = (
+            '<span class="cost-note">'
+            'Some activity prices are still unknown.'
+            '</span>'
+            if itinerary.activity_costs_incomplete
+            else ""
+        )
+
+        activities_cost = (
+            '<div class="activities-cost">'
+            '<strong>Estimated activities cost </strong>'
+            f'<p>{currency} {cost_text}</p>'
+            f'{incomplete_note}'
+            '</div>'
+        )
 
 
     return f"""
@@ -410,6 +574,9 @@ def render_itinerary_html(itinerary: Itinerary) -> str:
             <span class="eyebrow">YOUR PERSONAL TRAVEL PLAN</span>
             <h1>✈️ {_safe_text(itinerary.destination)}</h1>
             <p>{_safe_text(start)} – {_safe_text(end)}</p>
+            
+            {activities_cost}
+
             <span class="timezone">
                 Timezone: {_safe_text(itinerary.timezone)}
             </span>
